@@ -7,7 +7,7 @@ import 'dotenv/config'; // 加载 .env 中的环境变量
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { run, getGlobalTraceProvider } from '@openai/agents';
-import { agent, openaiClient } from './agent.js';
+import { agent, openaiClient, taskStateStore } from './agent.js';
 import { color, helpText } from './ui.js';
 import { ConversationHistory } from './history/index.js';
 import { ContextManager } from './context/index.js';
@@ -22,11 +22,20 @@ const contextManager = new ContextManager(openaiClient);
 // 注：@openai/agents 走 Responses API，该路径在 DeepSeek 端点上流式不生效（实测一次性返回），已接受此限制。
 async function printResponse(history: ConversationHistory): Promise<void> {
   process.stdout.write(color.dim('正在处理（可能需要联网搜索）…\n'));
-  // 裁剪 + 摘要注入，构造本轮实际发送的上下文
-  const systemPrompt = typeof agent.instructions === 'string' ? agent.instructions : '';
+  // 裁剪 + 摘要注入，构造本轮实际发送的上下文；
+  // 将 State 文本拼接到 System Prompt 之后（顺序：System Prompt > State > 摘要 > 历史），
+  // 由 ContextManager 统一计入 token 预算；State 独立于 history，不受裁剪影响
+  const basePrompt = typeof agent.instructions === 'string' ? agent.instructions : '';
+  const stateText = taskStateStore.toText();
+  const systemPrompt = [basePrompt, stateText].filter((t): t is string => !!t).join('\n\n');
   const { items } = await contextManager.build(history.getItems(), systemPrompt);
   const result = await run(agent, items);
   console.log(color.assistant('助手 > ') + (result.finalOutput ?? ''));
+  // 应用本轮模型对任务状态的更新（update_state 工具调用）
+  const applied = taskStateStore.applyFromHistory(result.state.history);
+  if (applied > 0) {
+    console.log(color.dim(`[状态已更新] ${applied} 次（/state 查看）`));
+  }
   // 增量同步：保留被裁剪掉的旧历史，仅追加本轮新增条目
   history.syncFromState(result.state, items);
 }
@@ -58,6 +67,12 @@ function printContextStats(): void {
     color.dim(`  裁剪：${stats.trimmed ? `已裁剪 ${stats.trimmedRounds} 轮` : '未裁剪'}`),
   );
   console.log(color.dim(`  摘要：${stats.hasSummary ? '生效中（/summary 查看内容）' : '无'}`));
+}
+
+// 打印任务状态（/state 调试命令）
+function printTaskState(): void {
+  const text = taskStateStore.toText();
+  console.log(color.dim(text ? `当前任务状态：\n${text}` : '当前无任务状态（开始一个新任务后，Agent 会自动记录）。'));
 }
 
 // 主循环：readline REPL，多轮对话
@@ -96,9 +111,14 @@ async function main() {
         console.log(color.dim(summary ? `当前摘要：\n${summary}` : '当前无摘要。'));
         continue;
       }
+      if (text === '/state') {
+        printTaskState();
+        continue;
+      }
       if (text === '/clear') {
         history.clear();
         contextManager.reset();
+        taskStateStore.reset();
         console.log(color.dim('会话已清空，开始新对话。'));
         continue;
       }

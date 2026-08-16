@@ -17,6 +17,7 @@ ${color.dim('可用命令：')}
   /history         查看当前内存中保存的历史条目统计
   /context         查看 Context 占用与裁剪状态
   /summary         查看当前历史摘要内容
+  /state           查看当前任务状态（任务/步骤/已完成/待完成/决策）
   /clear           清空当前会话上下文，开启新一轮对话
   /exit, /quit     退出程序（也可按 Ctrl+C 或 Ctrl+D）
 ${color.dim('直接输入内容即可与助手对话；需要最新信息时助手会自动联网搜索。')}

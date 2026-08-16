@@ -4,6 +4,7 @@
  */
 import { OpenAI } from 'openai';
 import { Agent, setDefaultOpenAIClient, type Tool } from '@openai/agents';
+import { TaskStateStore, createUpdateStateTool } from './state/index.js';
 
 // 读取环境变量并校验，返回确定类型
 function requireEnv(name: string): string {
@@ -36,11 +37,20 @@ const webSearchTool: Tool = {
   providerData: { type: 'web_search' },
 };
 
+// 任务状态存储（与 History 解耦）与更新工具
+const taskStateStore = new TaskStateStore();
+const updateStateTool = createUpdateStateTool(taskStateStore);
+
+/** 共享的任务状态存储（供主循环注入 Context、调试命令使用） */
+export { taskStateStore };
+
 export const agent = new Agent({
   name: 'History Tutor',
   instructions:
     'You provide assistance with historical queries. Explain important events and context clearly. ' +
-    'If the question involves recent, uncertain or unknown information, use the built-in web_search tool to verify before answering.',
+    'If the question involves recent, uncertain or unknown information, use the built-in web_search tool to verify before answering. ' +
+    'When the user proposes a new task, advances a task, completes a step, or makes a key decision, ' +
+    'call the update_state tool to keep the task state current.',
   model,
-  tools: [webSearchTool],
+  tools: [updateStateTool, webSearchTool],
 });
