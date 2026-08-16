@@ -17,11 +17,13 @@
   "scripts": {
     "build": "tsc",
     "start": "tsc && node dist/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsc && node test/context.test.mjs",
+    "test:e2e": "tsc && node test/e2e-context.test.mjs"
   },
   "dependencies": {
     "@openai/agents": "^0.16.0",
     "dotenv": "^17.4.2",
+    "tiktoken": "^1.0.22",
     "zod": "^4.4.3"
   },
   "devDependencies": {

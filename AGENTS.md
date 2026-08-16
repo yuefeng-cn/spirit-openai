@@ -7,5 +7,6 @@
 - 执行 `git push`
 - 执行 `git pull`
 - 执行 `git merge`
+- 输出emoji
 # 注释
 - 使用中文
