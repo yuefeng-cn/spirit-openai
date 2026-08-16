@@ -5,6 +5,7 @@
 import { OpenAI } from 'openai';
 import { Agent, setDefaultOpenAIClient, type Tool } from '@openai/agents';
 import { TaskStateStore, createUpdateStateTool } from './state/index.js';
+import { MemoryStore, createMemoryTools } from './memory/index.js';
 
 // 读取环境变量并校验，返回确定类型
 function requireEnv(name: string): string {
@@ -44,13 +45,23 @@ const updateStateTool = createUpdateStateTool(taskStateStore);
 /** 共享的任务状态存储（供主循环注入 Context、调试命令使用） */
 export { taskStateStore };
 
+// 会话级长期记忆仓库（内存 + 主题索引 + 按需加载）与读写工具
+const memoryStore = new MemoryStore();
+const memoryTools = createMemoryTools(memoryStore);
+
+/** 共享的记忆仓库（供主循环调试命令使用） */
+export { memoryStore };
+
 export const agent = new Agent({
   name: 'History Tutor',
   instructions:
     'You provide assistance with historical queries. Explain important events and context clearly. ' +
     'If the question involves recent, uncertain or unknown information, use the built-in web_search tool to verify before answering. ' +
     'When the user proposes a new task, advances a task, completes a step, or makes a key decision, ' +
-    'call the update_state tool to keep the task state current.',
+    'call the update_state tool to keep the task state current. ' +
+    'When the user states a long-term preference, a key project fact, or a durable decision, ' +
+    'call the remember tool to save it to the memory store. ' +
+    'When you need to recall previously saved preferences, facts, or decisions, call the retrieve_memory tool.',
   model,
-  tools: [updateStateTool, webSearchTool],
+  tools: [...memoryTools, updateStateTool, webSearchTool],
 });

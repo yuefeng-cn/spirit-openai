@@ -17,8 +17,8 @@
   "scripts": {
     "build": "tsc",
     "start": "tsc && node dist/index.js",
-    "test": "tsc && node test/context.test.mjs && node test/state.test.mjs",
-    "test:e2e": "tsc && node test/e2e-context.test.mjs && node test/e2e-state.test.mjs"
+    "test": "tsc && node test/context.test.mjs && node test/state.test.mjs && node test/memory.test.mjs",
+    "test:e2e": "tsc && node test/e2e-context.test.mjs && node test/e2e-state.test.mjs && node test/e2e-memory.test.mjs"
   },
   "dependencies": {
     "@openai/agents": "^0.16.0",

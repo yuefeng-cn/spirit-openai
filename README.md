@@ -40,22 +40,19 @@ Context / Memory 优化
  - ✅ Agent 执行过程中更新 State
  - ✅ 将必要 State 注入 Context
  - ✅ 测试 Context 裁剪后 Agent 能否继续任务
-### 第三阶段：Memory
- - 定义长期记忆类型
- - 用户偏好
- - 用户长期事实
- - 项目关键事实
- - 长期有效决策
- - 实现 Memory Write
- - 从对话中提取候选 Memory
- - 判断是否值得保存
- - 保存 Memory
- - 实现 Memory Storage
- - 实现 Memory Retrieval
- - 根据当前任务检索相关 Memory
- - 将相关 Memory 注入 Context
- - 实现 Memory 更新 / 去重 / 删除
- - 测试 Memory 是否能跨 Context 裁剪继续生效
+### 第三阶段：Memory ✅ 已完成
+ - ✅ 定义会话记忆类型
+ - ✅ 会话级别长期有效决策与项目关键事实
+ - ✅ 实现 Memory Write
+ - ✅ 从对话中提取候选 Memory
+ - ✅ 判断是否值得保存
+ - ✅ 保存 Memory
+ - ✅ 实现 Memory Storage
+ - ✅ 实现 Memory Retrieval
+ - ✅ 根据当前任务检索相关 Memory
+ - ✅ 将相关 Memory 注入 Context
+ - ✅ 实现 Memory 更新 / 去重 / 删除
+ - ✅ 测试 Memory 是否能跨 Context 裁剪继续生效
 ### 第四阶段：优化
  - 明确 History / Context / State / Memory 的边界
  - 建立 Context 优先级

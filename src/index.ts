@@ -7,7 +7,7 @@ import 'dotenv/config'; // 加载 .env 中的环境变量
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { run, getGlobalTraceProvider } from '@openai/agents';
-import { agent, openaiClient, taskStateStore } from './agent.js';
+import { agent, openaiClient, taskStateStore, memoryStore } from './agent.js';
 import { color, helpText } from './ui.js';
 import { ConversationHistory } from './history/index.js';
 import { ContextManager } from './context/index.js';
@@ -75,6 +75,26 @@ function printTaskState(): void {
   console.log(color.dim(text ? `当前任务状态：\n${text}` : '当前无任务状态（开始一个新任务后，Agent 会自动记录）。'));
 }
 
+// 打印记忆仓库（/memory 调试命令）
+function printMemory(args: string): void {
+  const [cmd, id] = args.trim().split(/\s+/);
+  if (cmd === 'del' && id) {
+    console.log(color.dim(memoryStore.remove(id) ? `已删除记忆 ${id}。` : `未找到记忆 ${id}。`));
+    return;
+  }
+  const list = memoryStore.list();
+  if (list.length === 0) {
+    console.log(color.dim('记忆仓库为空（模型遇到长期决策/关键事实时会自动保存）。'));
+    return;
+  }
+  const stats = memoryStore.stats();
+  console.log(color.dim(`记忆仓库（内存，共 ${list.length} 条；决策 ${stats.decision} / 事实 ${stats.fact}）：`));
+  for (const m of list) {
+    console.log(color.dim(`  [${m.category}] ${m.id.slice(0, 8)} 主题:${m.topic} — ${m.content}`));
+  }
+  console.log(color.dim('  用法：/memory del <id> 删除指定记忆'));
+}
+
 // 主循环：readline REPL，多轮对话
 async function main() {
   // terminal 模式仅当 stdin 是 TTY 时启用，管道/重定向输入也能正常工作
@@ -115,11 +135,16 @@ async function main() {
         printTaskState();
         continue;
       }
+      if (text.startsWith('/memory')) {
+        printMemory(text.slice('/memory'.length));
+        continue;
+      }
       if (text === '/clear') {
         history.clear();
         contextManager.reset();
         taskStateStore.reset();
-        console.log(color.dim('会话已清空，开始新对话。'));
+        memoryStore.clear();
+        console.log(color.dim('会话已清空（历史、Context、任务状态、记忆），开始新对话。'));
         continue;
       }
       if (text === '/exit' || text === '/quit') {
