@@ -3,7 +3,7 @@
  * 环境变量直接通过 process.env 读取（不单独建 config 模块）。
  */
 import { OpenAI } from 'openai';
-import { Agent, setDefaultOpenAIClient, type Tool } from '@openai/agents';
+import { Agent, setDefaultOpenAIClient, setOpenAIAPI } from '@openai/agents';
 import { TaskStateStore, createUpdateStateTool } from './state/index.js';
 import { MemoryStore, createMemoryTools } from './memory/index.js';
 
@@ -25,18 +25,14 @@ const customClient = new OpenAI({
 });
 setDefaultOpenAIClient(customClient);
 
+// 切换到 Chat Completions API（/v1/chat/completions），兼容 DeepSeek 等第三方端点。
+// 注意：Chat Completions 路径不支持 hosted web_search 工具，故本轮不启用联网工具。
+setOpenAIAPI('chat_completions');
+
 /** 共享的 OpenAI 客户端（Agent 内部与摘要生成等均使用） */
 export const openaiClient = customClient;
 
 const model = requireEnv('OPENAI_MODEL_ID');
-
-// 内置联网搜索工具：由模型在请求期间直接执行（hosted_tool），无需本地代码。
-// 仅 Responses API 路径支持（官方 Codex 集成声明 web_search_tool_type: "text"）。
-const webSearchTool: Tool = {
-  type: 'hosted_tool',
-  name: 'web_search',
-  providerData: { type: 'web_search' },
-};
 
 // 任务状态存储（与 History 解耦）与更新工具
 const taskStateStore = new TaskStateStore();
@@ -56,12 +52,11 @@ export const agent = new Agent({
   name: 'History Tutor',
   instructions:
     'You provide assistance with historical queries. Explain important events and context clearly. ' +
-    'If the question involves recent, uncertain or unknown information, use the built-in web_search tool to verify before answering. ' +
     'When the user proposes a new task, advances a task, completes a step, or makes a key decision, ' +
     'call the update_state tool to keep the task state current. ' +
     'When the user states a long-term preference, a key project fact, or a durable decision, ' +
     'call the remember tool to save it to the memory store. ' +
     'When you need to recall previously saved preferences, facts, or decisions, call the retrieve_memory tool.',
   model,
-  tools: [...memoryTools, updateStateTool, webSearchTool],
+  tools: [...memoryTools, updateStateTool],
 });

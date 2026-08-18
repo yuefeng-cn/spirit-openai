@@ -18,10 +18,10 @@ getGlobalTraceProvider().setDisabled(true);
 // Context 管理器：32K 窗口，超限时裁剪旧历史并生成摘要注入
 const contextManager = new ContextManager(openaiClient);
 
-// 打印助手回复：非流式一次性输出。
-// 注：@openai/agents 走 Responses API，该路径在 DeepSeek 端点上流式不生效（实测一次性返回），已接受此限制。
+// 打印助手回复：流式逐 token 输出。
+// 注：当前走 Chat Completions API，DeepSeek 等主流兼容端点均支持 stream: true。
 async function printResponse(history: ConversationHistory): Promise<void> {
-  process.stdout.write(color.dim('正在处理（可能需要联网搜索）…\n'));
+  process.stdout.write(color.dim('正在处理…\n'));
   // 裁剪 + 摘要注入，构造本轮实际发送的上下文；
   // 将 State 文本拼接到 System Prompt 之后（顺序：System Prompt > State > 摘要 > 历史），
   // 由 ContextManager 统一计入 token 预算；State 独立于 history，不受裁剪影响
@@ -29,8 +29,16 @@ async function printResponse(history: ConversationHistory): Promise<void> {
   const stateText = taskStateStore.toText();
   const systemPrompt = [basePrompt, stateText].filter((t): t is string => !!t).join('\n\n');
   const { items } = await contextManager.build(history.getItems(), systemPrompt);
-  const result = await run(agent, items);
-  console.log(color.assistant('助手 > ') + (result.finalOutput ?? ''));
+  const result = await run(agent, items, { stream: true });
+  // 流式输出文本到 stdout
+  process.stdout.write(color.assistant('助手 > '));
+  const textStream = result.toTextStream({ compatibleWithNodeStreams: true });
+  for await (const chunk of textStream) {
+    process.stdout.write(chunk);
+  }
+  process.stdout.write('\n');
+  // 等待流完全消费完毕，确保 state/history 已就绪
+  await result.completed;
   // 应用本轮模型对任务状态的更新（update_state 工具调用）
   const applied = taskStateStore.applyFromHistory(result.state.history);
   if (applied > 0) {
