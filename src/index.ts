@@ -1,54 +1,59 @@
 /**
- * spirit-openai 入口：REPL 多轮对话。
- * - 历史由 ConversationHistory（纯内存）保存全部对话条目，不写入文本文件
- * - Context 由 ContextManager 管理：32K 窗口限制、超限裁剪、历史摘要注入
+ * spirit-openai 入口：REPL 多轮对话 + 图片生成/编辑。
+ * - 历史持久化到 PostgreSQL，支持 --conversation <id> 恢复会话
+ * - 图片生成/编辑通过 Agent 工具调用，Provider 逻辑仅在 image/ 模块
+ * - CLI 输入行首若为有效图片文件路径则自动上传
  */
-import 'dotenv/config'; // 加载 .env 中的环境变量
+import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
+import { stat as statFile, readFile } from 'node:fs/promises';
+import { extname } from 'node:path';
 import { stdin as input, stdout as output } from 'node:process';
 import { run, getGlobalTraceProvider } from '@openai/agents';
-import { agent, openaiClient, taskStateStore, memoryStore } from './agent.js';
+import { createAgent, openaiClient, taskStateStore, memoryStore } from './agent.js';
 import { color, helpText } from './ui.js';
 import { ConversationHistory } from './history/index.js';
 import { ContextManager } from './context/index.js';
+import { migrate } from './persistence/database.js';
+import {
+  getOrCreateConversation,
+  loadMessages,
+  appendMessages,
+  DbImageRepo,
+} from './persistence/conversation-repository.js';
+import { ImageService, formatRef } from './image/image-service.js';
+import { LocalImageStorage } from './image/image-storage.js';
+import { OpenAIImageProvider } from './image/providers/openai.js';
+import { createImageTools } from './image/image-tools.js';
+import type { ImageVersion } from './image/types.js';
 
-// 禁用 trace 上报（自定义端点不支持 SDK 的遥测导出，避免非致命报错噪音）
+// 禁用 trace 上报
 getGlobalTraceProvider().setDisabled(true);
 
-// Context 管理器：32K 窗口，超限时裁剪旧历史并生成摘要注入
+// Context 管理器（模块级，会话间共享摘要逻辑）
 const contextManager = new ContextManager(openaiClient);
 
-// 打印助手回复：流式逐 token 输出。
-// 注：当前走 Chat Completions API，DeepSeek 等主流兼容端点均支持 stream: true。
-async function printResponse(history: ConversationHistory): Promise<void> {
-  process.stdout.write(color.dim('正在处理…\n'));
-  // 裁剪 + 摘要注入，构造本轮实际发送的上下文；
-  // 将 State 文本拼接到 System Prompt 之后（顺序：System Prompt > State > 摘要 > 历史），
-  // 由 ContextManager 统一计入 token 预算；State 独立于 history，不受裁剪影响
-  const basePrompt = typeof agent.instructions === 'string' ? agent.instructions : '';
-  const stateText = taskStateStore.toText();
-  const systemPrompt = [basePrompt, stateText].filter((t): t is string => !!t).join('\n\n');
-  const { items } = await contextManager.build(history.getItems(), systemPrompt);
-  const result = await run(agent, items, { stream: true });
-  // 流式输出文本到 stdout
-  process.stdout.write(color.assistant('助手 > '));
-  const textStream = result.toTextStream({ compatibleWithNodeStreams: true });
-  for await (const chunk of textStream) {
-    process.stdout.write(chunk);
+// ── 图片文件解析 ───────────────────────────────────────────
+
+/** 若输入行首为有效图片文件路径，提取路径和剩余文本 */
+async function parseImageFromInput(
+  line: string,
+): Promise<{ imagePath: string | null; text: string }> {
+  const trimmed = line.trim();
+  const firstToken = trimmed.split(/\s+/)[0];
+  if (/\.(png|jpe?g|webp)$/i.test(firstToken)) {
+    try {
+      await statFile(firstToken);
+      return { imagePath: firstToken, text: trimmed.slice(firstToken.length).trim() };
+    } catch {
+      // 文件不存在，当普通文本处理
+    }
   }
-  process.stdout.write('\n');
-  // 等待流完全消费完毕，确保 state/history 已就绪
-  await result.completed;
-  // 应用本轮模型对任务状态的更新（update_state 工具调用）
-  const applied = taskStateStore.applyFromHistory(result.state.history);
-  if (applied > 0) {
-    console.log(color.dim(`[状态已更新] ${applied} 次（/state 查看）`));
-  }
-  // 增量同步：保留被裁剪掉的旧历史，仅追加本轮新增条目
-  history.syncFromState(result.state, items);
+  return { imagePath: null, text: trimmed };
 }
 
-// 打印历史统计（/history 调试命令）
+// ── 辅助打印函数 ───────────────────────────────────────────
+
 function printHistoryStats(history: ConversationHistory): void {
   const stats = history.getStats();
   console.log(color.dim(`历史条目统计（内存，共 ${stats.total} 条）：`));
@@ -60,7 +65,6 @@ function printHistoryStats(history: ConversationHistory): void {
   console.log(color.dim(`  其他（reasoning 等）${stats.other} 条`));
 }
 
-// 打印 Context 占用统计（/context 调试命令）
 function printContextStats(): void {
   const stats = contextManager.getStats();
   if (!stats) {
@@ -77,13 +81,13 @@ function printContextStats(): void {
   console.log(color.dim(`  摘要：${stats.hasSummary ? '生效中（/summary 查看内容）' : '无'}`));
 }
 
-// 打印任务状态（/state 调试命令）
 function printTaskState(): void {
   const text = taskStateStore.toText();
-  console.log(color.dim(text ? `当前任务状态：\n${text}` : '当前无任务状态（开始一个新任务后，Agent 会自动记录）。'));
+  console.log(
+    color.dim(text ? `当前任务状态：\n${text}` : '当前无任务状态（开始一个新任务后，Agent 会自动记录）。'),
+  );
 }
 
-// 打印记忆仓库（/memory 调试命令）
 function printMemory(args: string): void {
   const [cmd, id] = args.trim().split(/\s+/);
   if (cmd === 'del' && id) {
@@ -96,58 +100,159 @@ function printMemory(args: string): void {
     return;
   }
   const stats = memoryStore.stats();
-  console.log(color.dim(`记忆仓库（内存，共 ${list.length} 条；决策 ${stats.decision} / 事实 ${stats.fact}）：`));
+  console.log(
+    color.dim(
+      `记忆仓库（内存，共 ${list.length} 条；决策 ${stats.decision} / 事实 ${stats.fact}）：`,
+    ),
+  );
   for (const m of list) {
-    console.log(color.dim(`  [${m.category}] ${m.id.slice(0, 8)} 主题:${m.topic} — ${m.content}`));
+    console.log(
+      color.dim(`  [${m.category}] ${m.id.slice(0, 8)} 主题:${m.topic} — ${m.content}`),
+    );
   }
   console.log(color.dim('  用法：/memory del <id> 删除指定记忆'));
 }
 
-// 主循环：readline REPL，多轮对话
+async function handleImageCommand(args: string, svc: ImageService): Promise<void> {
+  const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
+
+  if (!sub || sub === 'list') {
+    const versions = await svc.listVersions();
+    if (versions.length === 0) {
+      console.log(color.dim('当前会话暂无图片。'));
+      return;
+    }
+    const activeId = await svc.getActiveId();
+    // 建立 id → displayNo 映射，用于父图显示
+    const displayNoMap = new Map(versions.map((v) => [v.id, v.displayNo]));
+    console.log(color.dim(`会话图片列表（共 ${versions.length} 张）：`));
+    for (const v of versions) {
+      const isActive = v.id === activeId ? ' ← 当前活动' : '';
+      const parentNo = v.parentVersionId ? displayNoMap.get(v.parentVersionId) : undefined;
+      const parentStr = parentNo != null ? `  基于 @img-${parentNo}` : '';
+      console.log(
+        color.dim(
+          `  ${formatRef(v.displayNo)} [${v.sourceType}]${parentStr}${isActive}` +
+            (v.prompt ? `  "${v.prompt}"` : ''),
+        ),
+      );
+    }
+    return;
+  }
+
+  if (sub === 'use') {
+    const ref = rest[0];
+    if (!ref) {
+      console.log(color.dim('用法：/image use @img-N'));
+      return;
+    }
+    const result = await svc.resolveReference(ref);
+    if (!result.found) {
+      console.log(color.dim(`[图片] ${result.message}`));
+      return;
+    }
+    await svc.setActive(result.version.id);
+    console.log(color.dim(`[图片] 已将 ${formatRef(result.version.displayNo)} 设为活动图片。`));
+    return;
+  }
+
+  if (sub === 'clear') {
+    await svc.clearActive();
+    console.log(color.dim('[图片] 已清空活动图片。'));
+    return;
+  }
+
+  console.log(color.dim('可用子命令：/image list  /image use @img-N  /image clear'));
+}
+
+// ── 主循环 ─────────────────────────────────────────────────
+
 async function main() {
-  // terminal 模式仅当 stdin 是 TTY 时启用，管道/重定向输入也能正常工作
+  await migrate();
+
+  // 解析 --conversation <id> 参数
+  const convArgIndex = process.argv.indexOf('--conversation');
+  const requestedId = convArgIndex !== -1 ? process.argv[convArgIndex + 1] : undefined;
+
+  const conversation = await getOrCreateConversation(requestedId ?? crypto.randomUUID());
+  const conversationId = conversation.id;
+
   const rl = createInterface({ input, output, terminal: input.isTTY });
 
-  // 会话历史：纯内存保存全部对话条目（含工具调用与结果等）
+  // 历史恢复
   const history = new ConversationHistory();
+  const savedItems = await loadMessages(conversationId);
+  if (savedItems.length > 0) {
+    history.loadItems(savedItems);
+    console.log(color.dim(`[已恢复会话 ${conversationId}，共 ${savedItems.length} 条历史]`));
+  } else {
+    console.log(color.dim(`[新会话 ${conversationId}]`));
+  }
+  let persistedOffset = history.size;
 
-  console.log(color.assistant('历史助教已启动，随时提问。') + helpText);
+  // 图片服务
+  const IMAGE_STORE_DIR = process.env.IMAGE_STORE_DIR ?? './image-store';
+  const IMAGE_OUTPUT_DIR = process.env.IMAGE_OUTPUT_DIR ?? './image-output';
+  const imageStorage = new LocalImageStorage(IMAGE_STORE_DIR, IMAGE_OUTPUT_DIR);
+  const imageProvider = new OpenAIImageProvider();
+  const imageRepo = new DbImageRepo(conversationId);
+  const imageService = new ImageService(conversationId, imageRepo, imageStorage, imageProvider);
+
+  // 本轮上传图（供 edit_image 工具解析"这张图"引用）
+  let currentTurnUploads: ImageVersion[] = [];
+
+  // 创建带图片工具的 Agent
+  const imageTools = createImageTools(imageService, () => currentTurnUploads);
+  const sessionAgent = createAgent(imageTools);
+
+  // printResponse 捕获 sessionAgent
+  async function printResponse(h: ConversationHistory): Promise<void> {
+    process.stdout.write(color.dim('正在处理…\n'));
+    const basePrompt =
+      typeof sessionAgent.instructions === 'string' ? sessionAgent.instructions : '';
+    const stateText = taskStateStore.toText();
+    const systemPrompt = [basePrompt, stateText].filter((t): t is string => !!t).join('\n\n');
+    const { items } = await contextManager.build(h.getItems(), systemPrompt);
+    const result = await run(sessionAgent, items, { stream: true });
+    process.stdout.write(color.assistant('助手 > '));
+    const textStream = result.toTextStream({ compatibleWithNodeStreams: true });
+    for await (const chunk of textStream) {
+      process.stdout.write(chunk);
+    }
+    process.stdout.write('\n');
+    await result.completed;
+    const applied = taskStateStore.applyFromHistory(result.state.history);
+    if (applied > 0) {
+      console.log(color.dim(`[状态已更新] ${applied} 次（/state 查看）`));
+    }
+    h.syncFromState(result.state, items);
+  }
+
+  console.log(color.assistant('助教已启动，随时提问或生图。') + helpText);
 
   try {
     while (true) {
       const line = await rl.question(color.user('你 > '));
-      const text = line.trim();
 
       // 空输入：跳过
-      if (text === '') continue;
+      if (!line.trim()) continue;
 
       // 命令处理
-      if (text === '/help') {
-        console.log(helpText);
+      if (line.trim() === '/help') { console.log(helpText); continue; }
+      if (line.trim() === '/history') { printHistoryStats(history); continue; }
+      if (line.trim() === '/context') { printContextStats(); continue; }
+      if (line.trim() === '/summary') {
+        const s = contextManager.getSummary();
+        console.log(color.dim(s ? `当前摘要：\n${s}` : '当前无摘要。'));
         continue;
       }
-      if (text === '/history') {
-        printHistoryStats(history);
+      if (line.trim() === '/state') { printTaskState(); continue; }
+      if (line.trim().startsWith('/memory')) { printMemory(line.trim().slice('/memory'.length)); continue; }
+      if (line.trim().startsWith('/image')) {
+        await handleImageCommand(line.trim().slice('/image'.length).trim(), imageService);
         continue;
       }
-      if (text === '/context') {
-        printContextStats();
-        continue;
-      }
-      if (text === '/summary') {
-        const summary = contextManager.getSummary();
-        console.log(color.dim(summary ? `当前摘要：\n${summary}` : '当前无摘要。'));
-        continue;
-      }
-      if (text === '/state') {
-        printTaskState();
-        continue;
-      }
-      if (text.startsWith('/memory')) {
-        printMemory(text.slice('/memory'.length));
-        continue;
-      }
-      if (text === '/clear') {
+      if (line.trim() === '/clear') {
         history.clear();
         contextManager.reset();
         taskStateStore.reset();
@@ -155,22 +260,43 @@ async function main() {
         console.log(color.dim('会话已清空（历史、Context、任务状态、记忆），开始新对话。'));
         continue;
       }
-      if (text === '/exit' || text === '/quit') {
-        break;
+      if (line.trim() === '/exit' || line.trim() === '/quit') break;
+
+      // 每轮开始：清空本轮上传图
+      currentTurnUploads = [];
+
+      // 检测并上传行首图片文件
+      const { imagePath, text } = await parseImageFromInput(line);
+      if (imagePath) {
+        try {
+          const data = await readFile(imagePath);
+          const ext = extname(imagePath).slice(1).toLowerCase() || 'png';
+          const upload = await imageService.uploadFile(data, ext);
+          currentTurnUploads.push(upload);
+          console.log(color.dim(`[图片] ${formatRef(upload.displayNo)} 已上传（${imagePath}）`));
+        } catch (err) {
+          console.error(color.error(`[图片上传失败] ${err instanceof Error ? err.message : err}`));
+        }
       }
 
-      // 将本轮用户消息追加到历史，构造完整上下文
-      history.addUserMessage(text);
+      const userText = text || (currentTurnUploads.length > 0 ? '（我上传了一张图片）' : '');
+      if (!userText) continue;
+
+      history.addUserMessage(userText);
 
       try {
         await printResponse(history);
+        const newItems = history.getNewItemsSince(persistedOffset);
+        if (newItems.length > 0) {
+          await appendMessages(conversationId, newItems);
+          persistedOffset = history.size;
+        }
       } catch (err) {
-        // 单轮失败不中断整个会话
         console.error(color.error(`\n[出错] ${err instanceof Error ? err.message : err}`));
       }
     }
   } catch {
-    // Ctrl+C / Ctrl+D / EOF：正常退出循环
+    // Ctrl+C / Ctrl+D / EOF
   } finally {
     rl.close();
     console.log(color.dim('\n再见！'));

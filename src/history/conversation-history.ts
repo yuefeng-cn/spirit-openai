@@ -70,6 +70,21 @@ export class ConversationHistory {
     return [...this.items];
   }
 
+  /**
+   * 用持久化加载的条目初始化历史（会话恢复时调用，必须在任何 addUserMessage 之前）。
+   */
+  loadItems(items: AgentInputItem[]): void {
+    this.items = [...items];
+  }
+
+  /**
+   * 返回从 offset 开始的新增条目，用于增量持久化。
+   * offset 应为上次持久化时的 size。
+   */
+  getNewItemsSince(offset: number): AgentInputItem[] {
+    return this.items.slice(offset);
+  }
+
   /** 清空历史（/clear 命令） */
   clear(): void {
     this.items = [];

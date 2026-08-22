@@ -1,3 +1,15 @@
 node_modules
 .env
 dist
+
+# 本地图片输出（不提交）
+image-output/
+image-store/
+test-images/
+/tmp/
+
+# image_output_dir 自定义路径保护
+*.png
+*.jpg
+*.jpeg
+*.webp

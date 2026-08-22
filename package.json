@@ -16,18 +16,21 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "tsc && node dist/index.js",
-    "test": "tsc && node test/context.test.mjs && node test/state.test.mjs && node test/memory.test.mjs",
+    "start": "tsc && node --env-file=.env dist/index.js",
+    "test": "tsc && node test/context.test.mjs && node test/state.test.mjs && node test/memory.test.mjs && node test/image.test.mjs && node test/image-runtime.test.mjs && node test/image-tools.test.mjs",
+    "test:integration": "tsc && node --env-file=.env test/persistence.test.mjs && node --env-file=.env test/image-e2e.test.mjs",
     "test:e2e": "tsc && node test/e2e-context.test.mjs && node test/e2e-state.test.mjs && node test/e2e-memory.test.mjs"
   },
   "dependencies": {
     "@openai/agents": "^0.16.0",
     "dotenv": "^17.4.2",
+    "pg": "^8.23.0",
     "tiktoken": "^1.0.22",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^7.0.2"
   }
 }

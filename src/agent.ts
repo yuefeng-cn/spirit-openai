@@ -4,6 +4,7 @@
  */
 import { OpenAI } from 'openai';
 import { Agent, setDefaultOpenAIClient, setOpenAIAPI } from '@openai/agents';
+import type { Tool } from '@openai/agents';
 import { TaskStateStore, createUpdateStateTool } from './state/index.js';
 import { MemoryStore, createMemoryTools } from './memory/index.js';
 
@@ -48,15 +49,28 @@ const memoryTools = createMemoryTools(memoryStore);
 /** 共享的记忆仓库（供主循环调试命令使用） */
 export { memoryStore };
 
-export const agent = new Agent({
-  name: 'History Tutor',
-  instructions:
-    'You provide assistance with historical queries. Explain important events and context clearly. ' +
-    'When the user proposes a new task, advances a task, completes a step, or makes a key decision, ' +
-    'call the update_state tool to keep the task state current. ' +
-    'When the user states a long-term preference, a key project fact, or a durable decision, ' +
-    'call the remember tool to save it to the memory store. ' +
-    'When you need to recall previously saved preferences, facts, or decisions, call the retrieve_memory tool.',
-  model,
-  tools: [...memoryTools, updateStateTool],
-});
+const BASE_INSTRUCTIONS =
+  'You are a helpful assistant that can chat, answer questions, generate images, and edit images. ' +
+  'For image generation, call generate_image. For image editing, call edit_image with the reference to the target image. ' +
+  'If a user refers to an image ambiguously (e.g. "this image" but multiple candidates exist), ' +
+  'return the clarification message from the tool rather than guessing. ' +
+  'When the user proposes a new task, call update_state to keep task state current. ' +
+  'When the user states long-term preferences or key facts, call remember. ' +
+  'When you need to recall saved information, call retrieve_memory. ' +
+  '请用中文回复用户。';
+
+/**
+ * 创建 Agent 实例，可追加额外工具（如图片工具）。
+ * index.ts 在会话初始化后调用此工厂以注入 ImageService 绑定的工具。
+ */
+export function createAgent(extraTools: readonly Tool[] = []): Agent {
+  return new Agent({
+    name: 'Spirit',
+    instructions: BASE_INSTRUCTIONS,
+    model,
+    tools: [...memoryTools, updateStateTool, ...extraTools] as Tool[],
+  });
+}
+
+/** 不带图片工具的默认 agent（向后兼容，测试用） */
+export const agent = createAgent();
