@@ -10,6 +10,7 @@ import { stat as statFile, readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { stdin as input, stdout as output } from 'node:process';
 import { run, getGlobalTraceProvider } from '@openai/agents';
+import type { Agent } from '@openai/agents';
 import { createAgent, openaiClient, taskStateStore, memoryStore } from './agent.js';
 import { color, helpText } from './ui.js';
 import { ConversationHistory } from './history/index.js';
@@ -17,6 +18,7 @@ import { ContextManager } from './context/index.js';
 import { migrate } from './persistence/database.js';
 import {
   getOrCreateConversation,
+  listConversationSummaries,
   loadMessages,
   appendMessages,
   DbImageRepo,
@@ -174,38 +176,49 @@ async function main() {
   const convArgIndex = process.argv.indexOf('--conversation');
   const requestedId = convArgIndex !== -1 ? process.argv[convArgIndex + 1] : undefined;
 
-  const conversation = await getOrCreateConversation(requestedId ?? crypto.randomUUID());
-  const conversationId = conversation.id;
-
   const rl = createInterface({ input, output, terminal: input.isTTY });
 
-  // 历史恢复
-  const history = new ConversationHistory();
-  const savedItems = await loadMessages(conversationId);
-  if (savedItems.length > 0) {
-    history.loadItems(savedItems);
-    console.log(color.dim(`[已恢复会话 ${conversationId}，共 ${savedItems.length} 条历史]`));
-  } else {
-    console.log(color.dim(`[新会话 ${conversationId}]`));
-  }
-  let persistedOffset = history.size;
-
-  // 图片服务
+  // 图片存储（不随会话切换）
   const IMAGE_STORE_DIR = process.env.IMAGE_STORE_DIR ?? './image-store';
   const IMAGE_OUTPUT_DIR = process.env.IMAGE_OUTPUT_DIR ?? './image-output';
   const imageStorage = new LocalImageStorage(IMAGE_STORE_DIR, IMAGE_OUTPUT_DIR);
   const imageProvider = new OpenAIImageProvider();
-  const imageRepo = new DbImageRepo(conversationId);
-  const imageService = new ImageService(conversationId, imageRepo, imageStorage, imageProvider);
 
-  // 本轮上传图（供 edit_image 工具解析"这张图"引用）
+  // ── 可变会话状态 ─────────────────────────────────────────
+  let conversationId = '';
+  let history = new ConversationHistory();
+  let persistedOffset = 0;
+  let imageService: ImageService = new ImageService('', new DbImageRepo(''), imageStorage, imageProvider);
   let currentTurnUploads: ImageVersion[] = [];
+  let sessionAgent: Agent = createAgent();
 
-  // 创建带图片工具的 Agent
-  const imageTools = createImageTools(imageService, () => currentTurnUploads);
-  const sessionAgent = createAgent(imageTools);
+  /** 加载（或切换到）指定会话，重置所有内存状态 */
+  async function loadSession(id: string): Promise<void> {
+    conversationId = id;
+    history = new ConversationHistory();
+    contextManager.reset();
+    taskStateStore.reset();
+    memoryStore.clear();
+    const repo = new DbImageRepo(id);
+    imageService = new ImageService(id, repo, imageStorage, imageProvider);
+    currentTurnUploads = [];
+    sessionAgent = createAgent(createImageTools(imageService, () => currentTurnUploads));
 
-  // printResponse 捕获 sessionAgent
+    const savedItems = await loadMessages(id);
+    if (savedItems.length > 0) {
+      history.loadItems(savedItems);
+      console.log(color.dim(`[已恢复会话 ${id}，共 ${savedItems.length} 条历史]`));
+    } else {
+      console.log(color.dim(`[新会话 ${id}]`));
+    }
+    persistedOffset = history.size;
+  }
+
+  // 初始化第一个会话
+  const firstConv = await getOrCreateConversation(requestedId ?? crypto.randomUUID());
+  await loadSession(firstConv.id);
+
+  // printResponse 通过闭包读取可变的 sessionAgent
   async function printResponse(h: ConversationHistory): Promise<void> {
     process.stdout.write(color.dim('正在处理…\n'));
     const basePrompt =
@@ -228,7 +241,6 @@ async function main() {
     h.syncFromState(result.state, items);
   }
 
-  console.log(color.assistant('助教已启动，随时提问或生图。') + helpText);
 
   try {
     while (true) {
@@ -252,11 +264,47 @@ async function main() {
         await handleImageCommand(line.trim().slice('/image'.length).trim(), imageService);
         continue;
       }
+      if (line.trim() === '/sessions') {
+        const sessions = await listConversationSummaries();
+        if (sessions.length === 0) {
+          console.log(color.dim('暂无历史会话。'));
+        } else {
+          console.log(color.dim(`会话列表（共 ${sessions.length} 个，最新在前）：`));
+          for (const s of sessions) {
+            const isCurrent = s.id === conversationId ? ' ← 当前' : '';
+            const updated = s.updated_at.toLocaleString('zh-CN');
+            console.log(color.dim(`  ${s.id}  ${s.message_count} 条消息  更新于 ${updated}${isCurrent}`));
+          }
+          console.log(color.dim('  用法：/resume <id> 切换到指定会话（支持 ID 前缀）'));
+        }
+        continue;
+      }
+      if (line.trim().startsWith('/resume')) {
+        const id = line.trim().slice('/resume'.length).trim();
+        if (!id) {
+          console.log(color.dim('用法：/resume <conversation-id>'));
+          continue;
+        }
+        const sessions = await listConversationSummaries();
+        const matches = sessions.filter(s => s.id === id || s.id.startsWith(id));
+        if (matches.length === 0) {
+          console.log(color.dim(`[未找到会话 ${id}]`));
+        } else if (matches.length > 1) {
+          console.log(color.dim(`[前缀 "${id}" 匹配多个会话，请输入更多字符：]`));
+          for (const m of matches) console.log(color.dim(`  ${m.id}`));
+        } else if (matches[0].id === conversationId) {
+          console.log(color.dim(`[已在会话 ${conversationId}]`));
+        } else {
+          await loadSession(matches[0].id);
+        }
+        continue;
+      }
       if (line.trim() === '/clear') {
         history.clear();
         contextManager.reset();
         taskStateStore.reset();
         memoryStore.clear();
+        persistedOffset = 0;
         console.log(color.dim('会话已清空（历史、Context、任务状态、记忆），开始新对话。'));
         continue;
       }

@@ -13,13 +13,18 @@ export const color = {
 // 帮助信息
 export const helpText = `
 ${color.dim('可用命令：')}
-  /help            显示本帮助
-  /history         查看当前内存中保存的历史条目统计
-  /context         查看 Context 占用与裁剪状态
-  /summary         查看当前历史摘要内容
-  /state           查看当前任务状态（任务/步骤/已完成/待完成/决策）
-  /memory          查看记忆仓库；/memory del <id> 删除指定记忆
-  /clear           清空当前会话上下文，开启新一轮对话
-  /exit, /quit     退出程序（也可按 Ctrl+C 或 Ctrl+D）
-${color.dim('直接输入内容即可与助手对话；需要最新信息时助手会自动联网搜索。')}
+  /help                  显示本帮助
+  /sessions              列出所有历史会话
+  /resume <id>           切换到指定会话（支持 ID 前缀）
+  /history               查看当前内存中保存的历史条目统计
+  /context               查看 Context 占用与裁剪状态
+  /summary               查看当前历史摘要内容
+  /state                 查看当前任务状态（任务/步骤/已完成/待完成/决策）
+  /memory                查看记忆仓库；/memory del <id> 删除指定记忆
+  /image list            列出当前会话所有图片版本
+  /image use @img-N      将指定图片设为活动图
+  /image clear           清空活动图
+  /clear                 清空当前会话上下文，开启新一轮对话
+  /exit, /quit           退出程序（也可按 Ctrl+C 或 Ctrl+D）
+${color.dim('直接输入内容即可与助手对话。行首填写本地图片路径可上传图片。')}
 `;

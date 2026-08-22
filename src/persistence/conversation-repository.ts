@@ -57,6 +57,24 @@ export async function listConversations(): Promise<ConversationRow[]> {
   return result.rows;
 }
 
+export interface ConversationSummary extends ConversationRow {
+  message_count: number;
+}
+
+/** 列出所有会话及其消息数（最新在前） */
+export async function listConversationSummaries(): Promise<ConversationSummary[]> {
+  const pool = getPool();
+  const result = await pool.query<ConversationSummary>(
+    `SELECT c.id, c.summary, c.created_at, c.updated_at,
+            COUNT(m.id)::int AS message_count
+     FROM conversations c
+     LEFT JOIN messages m ON m.conversation_id = c.id
+     GROUP BY c.id
+     ORDER BY c.updated_at DESC`,
+  );
+  return result.rows;
+}
+
 // ── 消息 ──────────────────────────────────────────────────
 
 /** 批量追加消息条目（只追加，不修改旧记录） */
